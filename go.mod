@@ -1,3 +1,3 @@
-module github.com/brianlusina/robin-lb
+module github.com/SanctumLabs/kvz
 
 go 1.18

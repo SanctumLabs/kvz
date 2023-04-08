@@ -176,3 +176,103 @@ func nodeReplaceKidN(tree *BTree, new BNode, old BNode, idx uint16, kids ...BNod
 	}
 	nodeAppendRange(new, old, idx+inc, idx+1, old.nKeys()-(idx+1))
 }
+
+// leafDelete removes a key from a leaf node
+func leafDelete(new BNode, old BNode, idx uint16) {
+	new.setHeader(BNODE_LEAF, old.nKeys()-1)
+	nodeAppendRange(new, old, 0, 0, idx)
+	nodeAppendRange(new, old, idx, idx+1, old.nKeys()-(idx+1))
+}
+
+// treeDelete deletes a key from a tree
+func treeDelete(tree *BTree, node BNode, key []byte) BNode {
+	// where to find the key
+	idx := NodeLookupLE(node, key)
+
+	// act depending on the node type
+	switch node.bType() {
+	case BNODE_LEAF:
+		if !bytes.Equal(key, node.getKey(idx)) {
+			return BNode{} //not found
+		}
+		// delete the key in the leaf
+		new := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+		leafDelete(new, node, idx)
+		return new
+
+	case BNODE_NODE:
+		return nodeDelete(tree, node, idx, key)
+	default:
+		panic("bad node!")
+	}
+}
+
+func nodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
+	// recurse into the kid
+	kptr := node.getPtr(idx)
+	updated := treeDelete(tree, tree.get(kptr), key)
+	if len(updated.data) == 0 {
+		return BNode{} // not found
+	}
+	tree.del(kptr)
+
+	new := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+
+	// check for merging
+	mergeDir, sibling := shouldMerge(tree, node, idx, updated)
+	switch {
+	case mergeDir < 0: // left
+		merged := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+		nodeMerge(merged, sibling, updated)
+		tree.del(node.getPtr(idx - 1))
+		nodeReplace2Kid(new, node, idx-1, tree.new(merged), merged.getKey(0))
+	case mergeDir > 0: // right
+		merged := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+		nodeMerge(merged, updated, sibling)
+		tree.del(node.getPtr(idx + 1))
+		nodeReplace2Kid(new, node, idx, tree.new(merged), merged.getKey(0))
+	case mergeDir == 0:
+		if !(updated.nKeys() > 0) {
+			panic("number of keys not greater than 0")
+		}
+		nodeReplaceKidN(tree, new, node, idx, updated)
+	}
+	return new
+}
+
+// nodeMerge merges 2 nodes into 1
+func nodeMerge(new, left, right BNode) {
+	new.setHeader(uint16(left.bType()), left.nKeys()+right.nKeys())
+	nodeAppendRange(new, left, 0, 0, left.nKeys())
+	nodeAppendRange(new, right, left.nKeys(), 0, right.nKeys())
+}
+
+// shouldMerge returns the idx of the kid and the node. Checks if the updated kid should be merged with a sibling
+// The conditions are:
+// 1. The node is smaller than 1/4 of a page
+// 2. Has a sibling and the merged result does not exceed one page
+func shouldMerge(tree *BTree, node BNode, idx uint16, updated BNode) (int, BNode) {
+	if updated.nBytes() > BTREE_PAGE_SIZE/4 {
+		return 0, BNode{}
+	}
+
+	if idx > 0 {
+		sibling := tree.get(node.getPtr(idx - 1))
+		merged := sibling.nBytes() + updated.nBytes() - HEADER
+
+		if merged <= BTREE_PAGE_SIZE {
+			return -1, sibling
+		}
+	}
+
+	if idx+1 < node.nKeys() {
+		sibling := tree.get(node.getPtr(idx + 1))
+		merged := sibling.nBytes() + updated.nBytes() - HEADER
+
+		if merged <= BTREE_PAGE_SIZE {
+			return 1, sibling
+		}
+	}
+
+	return 0, BNode{}
+}
